@@ -252,3 +252,246 @@ class SimpleJSON(basepoller.BasePollerFT):
         result = self.extractor.search(r.json())
 
         return result
+
+class SimpleJSONPost(basepoller.BasePollerFT):
+    """Implements class for miners of JSON data. Provides facility to send a POST containing a query payload.
+    Useful for querying APIs
+
+    **Config parameters**
+        age_out:
+            default: How long discovered indicators should be kept within the EDL
+            interval: How often (in seconds) the query should run
+            sudden_death: Should indicators that no longer appear in query results be immediately revoked? (true/false)
+        attributes:
+            confidence: How confident we are indicators from this feed should be acted upon (1-100)
+            share_level: Used for filtering by downstream nodes (green/yellow/red)
+            type: Type of indicator being returned by the query (IPv4/IPv6/URL/domain)
+        fields:
+            - name-of-field
+        Headers:
+            ACCEPT: <REQUESTED_DATA_TYPE>
+            Authorization: <YOUR_API_TOKEN>
+            Cache-Control: no-cache
+            content-type: <DATA_TYPE_BEING_POSTED>
+        indicator: <FIELD_NAME>
+        prefix: string to prepend to indicator, use for filtering by downstream nodes
+        query_string: '<API_QUERY_STRING>'
+        source_name: <DESCRIPTIVE_DATA_SOURCE_NAME>
+        url: <API_URL>
+        verify_cert: <true/false>
+
+    Example:
+        Example config in YAML::
+
+            age_out:
+                default: 30d
+                interval: 257
+                sudden_death: false
+            attributes:
+                confidence: 100
+                share_level: green
+                type: IPv4
+            extractor: '[]'
+            fields:
+            - src_ip
+            headers:
+                ACCEPT: application/json
+                Authorization: imagine-this-is-an-API-token
+                Cache-Control: no-cache
+                content-type: application/json
+            indicator: src_ip
+            prefix: MyAPI
+            query_string: '{"queryString":"AlertAction = Block | AlertDescription = *ThreatDetected*
+                | groupBy([src_ip])","start":"5minutes","end":"now","isLive":false}'
+            source_name: MyDataSource
+            url: https://hostname.yourdomain.com/api/
+            verify_cert: false
+
+        Args:
+        name (str): node name, should be unique inside the graph
+        chassis (object): parent chassis instance
+        config (dict): node config.
+    """
+
+    def configure(self):
+        super(SimpleJSONPost, self).configure()
+
+        self.url = self.config.get('url', None)
+        self.polling_timeout = self.config.get('polling_timeout', 20)
+        self.verify_cert = self.config.get('verify_cert', True)
+        self.query_string = self.config.get('query_string', None)
+
+        self.compile_error = None
+        try:
+            self.extractor = jmespath.compile(self.config.get('extractor', '@'))
+        except Exception as e:
+            LOG.debug('%s - exception in jmespath: %s',
+                      self.name, e)
+            self.compile_error = "{}".format(e)
+
+        self.indicator = self.config.get('indicator', 'indicator')
+        self.prefix = self.config.get('prefix', 'json')
+        self.fields = self.config.get('fields', None)
+
+        self.username = self.config.get('username', None)
+        self.password = self.config.get('password', None)
+
+        self.headers = self.config.get('headers', None)
+
+        # option for enabling client cert, default disabled
+        self.client_cert_required = self.config.get('client_cert_required', False)
+        self.key_file = self.config.get('key_file', None)
+        if self.key_file is None and self.client_cert_required:
+            self.key_file = os.path.join(
+                os.environ['MM_CONFIG_DIR'],
+                '%s.pem' % self.name
+            )
+        self.cert_file = self.config.get('cert_file', None)
+        if self.cert_file is None and self.client_cert_required:
+            self.cert_file = os.path.join(
+                os.environ['MM_CONFIG_DIR'],
+                '%s.crt' % self.name
+            )
+
+        self.side_config_path = self.config.get('side_config', None)
+        if self.side_config_path is None:
+            self.side_config_path = os.path.join(
+                os.environ['MM_CONFIG_DIR'],
+                '%s_side_config.yml' % self.name
+            )
+
+        self._load_side_config()
+
+    def _load_side_config(self):
+        try:
+            with open(self.side_config_path, 'r') as f:
+                sconfig = yaml.safe_load(f)
+
+        except Exception as e:
+            LOG.error('%s - Error loading side config: %s', self.name, str(e))
+            return
+
+        username = sconfig.get('username', None)
+        password = sconfig.get('password', None)
+        if username is not None and password is not None:
+            self.username = username
+            self.password = password
+            LOG.info('{} - Loaded credentials from side config'.format(self.name))
+
+    def hup(self, source=None):
+        LOG.info('%s - hup received, reload side config', self.name)
+        self._load_side_config()
+        super(HumioQuery, self).hup(source)
+
+    @staticmethod
+    def gc(name, config=None):
+        basepoller.BasePollerFT.gc(name, config=config)
+
+        side_config_path = None
+        if config is not None:
+            side_config_path = config.get('side_config', None)
+        if side_config_path is None:
+            side_config_path = os.path.join(
+                os.environ['MM_CONFIG_DIR'],
+                '{}_side_config.yml'.format(name)
+            )
+
+        try:
+            os.remove(side_config_path)
+        except:
+            pass
+
+        client_cert_required = False
+        if config is not None:
+            client_cert_required = config.get('client_cert_required', False)
+
+        if config is not None:
+            cert_path = config.get('cert_file', None)
+            if cert_path is None and client_cert_required:
+                cert_path = os.path.join(
+                    os.environ['MM_CONFIG_DIR'],
+                    '{}.crt'.format(name)
+                )
+
+            if cert_path is not None:
+                try:
+                    os.remove(cert_path)
+                except:
+                    pass
+
+        if config is not None:
+            key_path = config.get('key_file', None)
+            if key_path is None and client_cert_required:
+                key_path = os.path.join(
+                    os.environ['MM_CONFIG_DIR'],
+                    '{}.pem'.format(name)
+                )
+
+            if key_path is not None:
+                try:
+                    os.remove(key_path)
+                except:
+                    pass
+
+    def _process_item(self, item):
+        if self.indicator not in item:
+            LOG.debug('%s not in %s', self.indicator, item)
+            return [[None, None]]
+
+        indicator = item[self.indicator]
+        if not (isinstance(indicator, str) or
+                isinstance(indicator, unicode)):
+            LOG.error(
+                'Wrong indicator type: %s - %s',
+                indicator, type(indicator)
+            )
+            return [[None, None]]
+
+        fields = self.fields
+        if fields is None:
+            fields = item.keys()
+            fields.remove(self.indicator)
+
+        attributes = {}
+        for field in fields:
+            if field not in item:
+                continue
+            attributes['%s_%s' % (self.prefix, field)] = item[field]
+
+        return [[indicator, attributes]]
+
+    def _build_iterator(self, now):
+        if self.compile_error is not None:
+            raise RuntimeError(self.compile_error)
+
+        rkwargs = dict(
+            stream=False,
+            verify=self.verify_cert,
+            timeout=self.polling_timeout,
+            data=self.query_string
+        )
+
+        if self.username is not None and self.password is not None:
+            rkwargs['auth'] = (self.username, self.password)
+
+        if self.headers is not None:
+            rkwargs['headers'] = self.headers
+
+        if self.client_cert_required and self.key_file is not None and self.cert_file is not None:
+            rkwargs['cert'] = (self.cert_file, self.key_file)
+
+        r = requests.post(
+            self.url,
+            **rkwargs
+        )
+
+        try:
+            r.raise_for_status()
+        except:
+            LOG.debug('%s - exception in request: %s %s',
+                      self.name, r.status_code, r.content)
+            raise
+
+        result = self.extractor.search(r.json())
+
+        return result

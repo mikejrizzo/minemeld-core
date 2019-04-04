@@ -47,6 +47,9 @@
     "minemeld.ft.json.SimpleJSON": {
         "class": "minemeld.ft.json:SimpleJSON"
     },
+    "minemeld.ft.json.SimpleJSONPost": {
+        "class": "minemeld.ft.json:SimpleJSONPost"
+    },
     "minemeld.ft.local.YamlFT": {
         "class": "minemeld.ft.local:YamlFT"
     },
